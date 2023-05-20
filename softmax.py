@@ -53,7 +53,7 @@ class Attention(nn.Module):
         n = x.shape[1] #x is in shape of (batchsize, length, dim)
         x_norm = torch.norm(x, 2, dim = -1, keepdim= True)
         x_ = x/x_norm
-        x_cossim = torch.tril((x_ @ x_.transpose(-2, -1)), diagonal= -1).sum(dim = (-1, -2))/(n*(n - 1))
+        x_cossim = torch.tril((x_ @ x_.transpose(-2, -1)), diagonal= -1).sum(dim = (-1, -2))/(n*(n - 1)/2)
         x_cossim = x_cossim.mean()
         import pdb;pdb.set_trace()
         ################
