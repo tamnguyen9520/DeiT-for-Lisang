@@ -1,265 +1,158 @@
 # Copyright (c) 2015-present, Facebook, Inc.
 # All rights reserved.
-"""
-Train and eval functions used in main.py
-"""
-import math
-import sys
-from typing import Iterable, Optional
-from fvcore.nn import FlopCountAnalysis
+import os
+import json
 
 
-import torch
+from torchvision import datasets, transforms
+from torchvision.datasets.folder import ImageFolder, default_loader
 
 
-from timm.data import Mixup
-from timm.utils import accuracy, ModelEma
-from imagenet_a import indices_in_1k, imagenet_r_mask, imagenet_a_mask, imagenet_o_mask
+from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from timm.data import create_transform
 
 
-from losses import DistillationLoss
-import utils
-import pdb
+PATH_TO_IMAGENET_VAL = '/tam/data/imagenet/val'
 
 
+def create_symlinks_to_imagenet(imagenet_folder, folder_to_scan):
+    if not os.path.exists(imagenet_folder):
+        os.makedirs(imagenet_folder)
+        folders_of_interest = os.listdir(folder_to_scan)
+        path_prefix = PATH_TO_IMAGENET_VAL
+        for folder in folders_of_interest:
+            os.symlink(path_prefix + folder, imagenet_folder+folder, target_is_directory=True)
 
 
-def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
-                    data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
-                    model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,
-                    set_training_mode=True):
-    model.train(set_training_mode)
-    metric_logger = utils.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 10
 
 
-    # i = 0.
-    for i, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
-        samples = samples.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-        # if i == 50:
-        #     break
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
+class INatDataset(ImageFolder):
+    def __init__(self, root, train=True, year=2018, transform=None, target_transform=None,
+                 category='name', loader=default_loader):
+        self.transform = transform
+        self.loader = loader
+        self.target_transform = target_transform
+        self.year = year
+        # assert category in ['kingdom','phylum','class','order','supercategory','family','genus','name']
+        path_json = os.path.join(root, f'{"train" if train else "val"}{year}.json')
+        with open(path_json) as json_file:
+            data = json.load(json_file)
 
 
-        with torch.cuda.amp.autocast():
-            # flops = FlopCountAnalysis(model,samples)
-            # print(flops.total()/1e9)
-            # assert 1==2
-            outputs = model(samples)
-            loss = criterion(samples, outputs, targets)
-       
-        # break
+        with open(os.path.join(root, 'categories.json')) as json_file:
+            data_catg = json.load(json_file)
 
 
-        # loss = loss +
-        loss_value = loss.item()
+        path_json_for_targeter = os.path.join(root, f"train{year}.json")
 
 
-        if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            sys.exit(1)
+        with open(path_json_for_targeter) as json_file:
+            data_for_targeter = json.load(json_file)
 
 
-        optimizer.zero_grad()
+        targeter = {}
+        indexer = 0
+        for elem in data_for_targeter['annotations']:
+            king = []
+            king.append(data_catg[int(elem['category_id'])][category])
+            if king[0] not in targeter.keys():
+                targeter[king[0]] = indexer
+                indexer += 1
+        self.nb_classes = len(targeter)
 
 
-        # this attribute is added by timm on one optimizer (adahessian)
-        is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-        loss_scaler(loss, optimizer, clip_grad=max_norm,
-                    parameters=model.parameters(), create_graph=is_second_order)
+        self.samples = []
+        for elem in data['images']:
+            cut = elem['file_name'].split('/')
+            target_current = int(cut[2])
+            path_current = os.path.join(root, cut[0], cut[2], cut[3])
 
 
-        torch.cuda.synchronize()
-        if model_ema is not None:
-            model_ema.update(model)
+            categors = data_catg[target_current]
+            target_current_true = targeter[categors[category]]
+            self.samples.append((path_current, target_current_true))
 
 
-        metric_logger.update(loss=loss_value)
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
-    print("Averaged stats:", metric_logger)
-   
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    # __getitem__ and __len__ inherited from ImageFolder
 
 
 
 
-def train_one_epoch_pi_loss(model: torch.nn.Module, criterion: DistillationLoss,
-                    data_loader: Iterable, optimizer: torch.optim.Optimizer,
-                    device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
-                    model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None,
-                    set_training_mode=True, reg_coef = 0.1):
-    model.train(set_training_mode)
-    metric_logger = utils.MetricLogger(delimiter="  ")
-    metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
-    header = 'Epoch: [{}]'.format(epoch)
-    print_freq = 10
+def build_dataset(is_train, args):
+    transform = build_transform(is_train, args)
 
 
-    for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
-        samples = samples.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
+    if args.data_set == 'CIFAR':
+        dataset = datasets.CIFAR100(args.data_path, train=is_train, transform=transform)
+        nb_classes = 100
+    elif args.data_set == 'IMNET':
+        root = os.path.join(args.data_path, 'train' if is_train else 'val')
+        dataset = datasets.ImageFolder(root, transform=transform)
+        nb_classes = 1000
+    elif args.data_set == 'INAT':
+        dataset = INatDataset(args.data_path, train=is_train, year=2018,
+                              category=args.inat_category, transform=transform)
+        nb_classes = dataset.nb_classes
+    elif args.data_set == 'INAT19':
+        dataset = INatDataset(args.data_path, train=is_train, year=2019,
+                              category=args.inat_category, transform=transform)
+        nb_classes = dataset.nb_classes
+    elif args.data_set in ['IMNET-RobustA', 'IMNET-RobustR']:
+        dataset = datasets.ImageFolder(args.data_path, transform=transform)
+        nb_classes = 1000
+    elif args.data_set == 'IMNET-RobustO':
+        dataset_out = datasets.ImageFolder(args.data_path, transform=transform)
+        imagenet_o_folder = "imagenet_val_for_imagenet_o_ood/"
+        create_symlinks_to_imagenet(imagenet_o_folder, args.data_path)
+        dataset_in = datasets.ImageFolder(imagenet_o_folder, transform=transform)
+        nb_classes = 1000
+    elif args.data_set == 'IMNET-RobustC':
+        dataset = []
+        for severity in range(1, 6):
+            root = os.path.join(args.data_path, args.distortion_name, str(severity))
+            dataset.append(datasets.ImageFolder(root, transform=transform))
+        nb_classes = 1000
+
+
+    return dataset, nb_classes
+
+
+
+
+def build_transform(is_train, args):
+    resize_im = args.input_size > 32
+    if is_train:
+        # this should always dispatch to transforms_imagenet_train
+        transform = create_transform(
+            input_size=args.input_size,
+            is_training=True,
+            color_jitter=args.color_jitter,
+            auto_augment=args.aa,
+            interpolation=args.train_interpolation,
+            re_prob=args.reprob,
+            re_mode=args.remode,
+            re_count=args.recount,
+        )
+        if not resize_im:
+            # replace RandomResizedCropAndInterpolation with
+            # RandomCrop
+            transform.transforms[0] = transforms.RandomCrop(
+                args.input_size, padding=4)
+        return transform
+
+
+    t = []
+    if resize_im:
+        size = int((256 / 224) * args.input_size)
+        t.append(
+            transforms.Resize(size, interpolation=3),  # to maintain same ratio w.r.t. 224 images
+        )
+        t.append(transforms.CenterCrop(args.input_size))
+
+
+    t.append(transforms.ToTensor())
+    t.append(transforms.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD))
+    return transforms.Compose(t)
 
 
-        if mixup_fn is not None:
-            samples, targets = mixup_fn(samples, targets)
-
-
-        with torch.cuda.amp.autocast():
-            outputs = model(samples)
-            loss = criterion(samples, outputs, targets)
-
-
-        pi_reg = 0.
-        for i in range(12):
-            pi_reg = pi_reg + torch.log(1/(abs(model.module.blocks[i].attn.pi + 1e-6))).mean()
-
-
-        # loss = loss +
-       
-        loss = loss + reg_coef*pi_reg
-        loss_value = loss.item()
-
-
-        if not math.isfinite(loss.item()):
-            print("Loss is {}, stopping training".format(loss.item()))
-            sys.exit(1)
-
-
-        optimizer.zero_grad()
-
-
-        # this attribute is added by timm on one optimizer (adahessian)
-        is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
-        loss_scaler(loss, optimizer, clip_grad=max_norm,
-                    parameters=model.parameters(), create_graph=is_second_order)
-
-
-        torch.cuda.synchronize()
-        if model_ema is not None:
-            model_ema.update(model)
-
-
-        metric_logger.update(loss=loss_value)
-        metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
-    print("Averaged stats:", metric_logger)
-   
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-
-
-
-
-@torch.no_grad()
-def evaluate(data_loader, model, device, attn_only=False, batch_limit=0):
-    criterion = torch.nn.CrossEntropyLoss()
-
-
-    metric_logger = utils.MetricLogger(delimiter="  ")
-    header = 'Test:'
-
-
-    # switch to evaluation mode
-    model.eval()
-    # i = 0
-    if not isinstance(batch_limit, int) or batch_limit < 0:
-        batch_limit = 0
-    attn = []
-    pi = []
-    for i, (images, target) in enumerate(metric_logger.log_every(data_loader, 10, header)):
-        if i >= batch_limit > 0:
-            break
-        images = images.to(device, non_blocking=True)
-        target = target.to(device, non_blocking=True)
-
-
-        with torch.cuda.amp.autocast():
-            if attn_only:
-                output, _aux = model(images)
-                attn.append(_aux[0].detach().cpu().numpy())
-                pi.append(_aux[1].detach().cpu().numpy())
-                del _aux
-            else:
-                output = model(images)
-            loss = criterion(output, target)
-
-
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-
-
-        batch_size = images.shape[0]
-        metric_logger.update(loss=loss.item())
-        metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
-        metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
-    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
-          .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
-
-
-    r = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-    if attn_only:
-        return r, (attn, pi)
-    return r
-
-
-
-
-@torch.no_grad()
-def evaluate_robust(data_loader, model, device, data_set = None):
-    criterion = torch.nn.CrossEntropyLoss()
-
-
-    metric_logger = utils.MetricLogger(delimiter="  ")
-    header = 'Test:'
-
-
-    # switch to evaluation mode
-    model.eval()
-
-
-    for images, target in metric_logger.log_every(data_loader, 10, header):
-        images = images.to(device, non_blocking=True)
-        target = target.to(device, non_blocking=True)
-
-
-        # compute output
-        with torch.cuda.amp.autocast():
-           
-            output = model(images)
-            if data_set == 'IMNET-RobustA':
-                output = output[:, imagenet_a_mask]
-            elif data_set == 'IMNET-RobustR':
-                # assert 1==2, 'R'
-                output = output[:, imagenet_r_mask]
-            elif data_set == 'IMNET-RobustO':
-                # assert 1==2, 'R'
-                output = output[:, imagenet_o_mask]
-
-
-                # assert 1==2
-            loss = criterion(output, target)
-
-
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-
-
-        batch_size = images.shape[0]
-        metric_logger.update(loss=loss.item())
-        metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
-        metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
-    # gather the stats from all processes
-    metric_logger.synchronize_between_processes()
-    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
-          .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
-
-
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
 
