@@ -9,7 +9,6 @@ from timm.models.vision_transformer import _cfg
 from softmax import VisionTransformer
 from timm.models.registry import register_model
 from timm.models.layers import trunc_normal_
-from xcit import XCiT, HDPXCiT
 
 class DistilledVisionTransformer(VisionTransformer):
     def __init__(self, *args, **kwargs):
