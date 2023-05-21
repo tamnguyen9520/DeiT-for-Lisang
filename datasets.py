@@ -97,21 +97,7 @@ def build_dataset(is_train, args):
         dataset = INatDataset(args.data_path, train=is_train, year=2019,
                               category=args.inat_category, transform=transform)
         nb_classes = dataset.nb_classes
-    elif args.data_set in ['IMNET-RobustA', 'IMNET-RobustR']:
-        dataset = datasets.ImageFolder(args.data_path, transform=transform)
-        nb_classes = 1000
-    elif args.data_set == 'IMNET-RobustO':
-        dataset_out = datasets.ImageFolder(args.data_path, transform=transform)
-        imagenet_o_folder = "imagenet_val_for_imagenet_o_ood/"
-        create_symlinks_to_imagenet(imagenet_o_folder, args.data_path)
-        dataset_in = datasets.ImageFolder(imagenet_o_folder, transform=transform)
-        nb_classes = 1000
-    elif args.data_set == 'IMNET-RobustC':
-        dataset = []
-        for severity in range(1, 6):
-            root = os.path.join(args.data_path, args.distortion_name, str(severity))
-            dataset.append(datasets.ImageFolder(root, transform=transform))
-        nb_classes = 1000
+
 
 
     return dataset, nb_classes
